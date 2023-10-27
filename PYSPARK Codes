@@ -1,0 +1,259 @@
+
+#first moved the data to the local system.
+[hduser@localhost ipldata]$ ls
+Player.csv  Player_Match.csv  PySparkTask1.txt  Team.csv
+[hduser@localhost ipldata]$ 
+
+#creating in Hive databases with ipldata 
+
+hive> CREATE DATABASE ipldata;
+OK
+Time taken: 29.733 seconds
+hive> USE ipldata;
+OK
+Time taken: 0.077 seconds
+hive> show tables;
+OK
+Time taken: 0.363 seconds
+hive> 
+
+#Task 1
+
+1. Load Player.csv file into a dataframe using custom schema and load it into a table tbl_player in ipldata db with below columns .
+   table name : tbl_player
+   columns : Player_Id,Player_Name,DOB
+   filter : exclude umpire records based on aplying filter Is_Umpire=0
+   partition col : country
+   
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+
+spark = SparkSession.builder.appName("ipldata") \
+    .config("spark.jars", "/home/hduser/install/mysql-connector-java.jar") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+custom_schema = StructType([
+    StructField("Player_Id", IntegerType(), True),
+    StructField("Player_Name", StringType(), True),
+    StructField("DOB", StringType(), True),
+    StructField("Batting_Hand", StringType(), True),
+    StructField("Bowling_Skill", StringType(), True),
+    StructField("Country", StringType(), True),
+    StructField("Is_Umpire", IntegerType(), True),
+])
+
+df = spark.read.options(header=True).csv("file:/home/hduser/ipldata/Player.csv", schema=custom_schema)
+
+df.createOrReplaceTempView("tbl_player")
+
+filtered_df = df.filter(col("Is_Umpire") == 0)
+
+filtered_df.select("Player_Id", "Player_Name", "DOB", "Country").write.mode("overwrite").saveAsTable("ipldata.tbl_player")
+
+
+#Task no:2
+
+2. create and load into a hive table with below information from player dataframe. 
+    table name : tbl_player_detail
+    filter : exclude umbire records based on aplying filter Is_Umpire=0
+    columns : Player_Id,age,iswktkeeper
+	-> you can calculate age from DOB
+	-> you can calculate iswktkeeper is Y when he cant bowl 
+    
+    
+from pyspark.sql.functions import current_date, to_date, year, when
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("ipldata").enableHiveSupport().getOrCreate()
+
+custom_schema = StructType([
+    StructField("Player_Id", IntegerType(), True),
+    StructField("Player_Name", StringType(), True),
+    StructField("DOB", StringType(), True),
+    StructField("Batting_Hand", StringType(), True),
+    StructField("Bowling_Skill", StringType(), True),
+    StructField("Country", StringType(), True),
+    StructField("Is_Umpire", IntegerType(), True),
+])
+
+df = spark.read.options(header=True).csv("file:/home/hduser/ipldata/Player.csv", schema=custom_schema)
+
+df.createOrReplaceTempView("tbl_player")
+
+filtered_df = df.filter(col("Is_Umpire") == 0)
+filtered_df = filtered_df.withColumn("DOB", to_date(filtered_df["DOB"], "dd MMMM yyyy"))
+filtered_df = filtered_df.withColumn("age", year(current_date()) - year(filtered_df["DOB"]))
+filtered_df = filtered_df.withColumn("iswktkeeper", when(filtered_df["Bowling_Skill"] == "NA", "Y").otherwise("N"))
+
+player_detail_df = filtered_df.select("Player_Id", "age", "iswktkeeper")
+player_detail_df.write.mode("overwrite").saveAsTable("ipldata.tbl_player_detail")
+
+
+#Task no: 3
+3. create and load hive table tbl_umpire from player dataframe
+    table name: tbl_umpire
+	columns: id,name ,country
+
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("ipldata").config("spark.jars", "/home/hduser/install/mysql-connector-java.jar").enableHiveSupport().getOrCreate()
+
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+
+custom_schema = StructType([
+    StructField("Player_Id", IntegerType(), True),
+    StructField("Player_Name", StringType(), True),
+    StructField("DOB", StringType(), True),
+    StructField("Batting_Hand", StringType(), True),
+    StructField("Bowling_Skill", StringType(), True),
+    StructField("Country", StringType(), True),
+    StructField("Is_Umpire", IntegerType(), True),
+])
+
+df = spark.read.options(header=True).csv("file:/home/hduser/ipldata/Player.csv", schema=custom_schema)
+
+selected_columns = df.select("Player_Id", "Player_Name", "Country")
+selected_columns.write.mode("overwrite").saveAsTable("tbl_umpire")
+
+**********************************************************************************************************************************************************
+
+II. use Player_Match.csv and hive table tbl_player for the below use cases  
+
+1. Get the total number of matches played by a captain and who is also a keeper
+   output file : captain_wktkeeper.json 
+   columns : playername , country , toal_matchesplayed_as captain
+   -> for this use case you can join Player_Match.csv with tbl_player
+   -> for getting captain and wkt keepr records you can aply a filter Is_Keeper=1,Is_Captain=1 on Player_Match data.
+   
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum
+from pyspark.sql.types import IntegerType
+import json
+
+spark = SparkSession.builder.appName("Captain_WicketKeeper") \
+    .config("spark.jars", "/home/hduser/install/mysql-connector-java.jar") \
+    .enableHiveSupport() \
+    .getOrCreate()
+
+player_df = spark.table("tbl_player")
+player_match_df = spark.read.option("header", "true").csv("file:/home/hduser/ipldata/Player_Match.csv")
+filtered_player_match_df = player_match_df.filter((col("Is_Captain") == 1) & (col("Is_Keeper") == 1))
+joined_df = filtered_player_match_df.join(player_df, player_match_df["Player_Id"] == player_df["Player_Id"])
+result_df = joined_df.groupBy("Player_Name", "Country").agg(sum(col("Is_Captain").cast(IntegerType())).alias("total_matchesplayed_as_captain"))
+result_df = result_df.select("Player_Name", "Country", "total_matchesplayed_as_captain")
+result_json = result_df.toJSON().collect()
+output_data = [json.loads(row) for row in result_json]
+with open("captain_wktkeeper.json", "w") as output_file:
+    json.dump(output_data, output_file, indent=2)
+
+
+
+   
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, sum
+from pyspark.sql.types import IntegerType
+import json
+
+spark = SparkSession.builder.appName("Captain_WicketKeeper") \
+...     .config("spark.jars", "/home/hduser/install/mysql-connector-java.jar") \
+...     .enableHiveSupport() \
+...     .getOrCreate()  #Here, a Spark session is created with the name "Captain_WicketKeeper," and the Hive support is enabled. 
+                        #The configuration includes specifying the location of the MySQL Connector JAR file.
+
+player_match_df = spark.read.option("header", "true").csv("file:/home/hduser/ipldata/Player_Match.csv") #loading the dataframes here player_match_df is loaded from the CSV file "Player_Match.csv" with headers.
+player_df = spark.table("tbl_player") #loading the dataframes here player_df is loaded from the Hive table "tbl_player."
+filtered_player_match_df = player_match_df.filter((col("Is_Captain") == 1) & (col("Is_Keeper") == 1)) 
+#This line filters the player_match_df DataFrame to select players who are both captains (Is_Captain = 1) and wicket-keepers (Is_Keeper = 1).
+joined_df = filtered_player_match_df.join(player_df, player_match_df["Player_Id"] == player_df["Player_Id"])
+#the above code performs It performs an inner join between filtered_player_match_df and player_df based on the "Player_Id" column to combine player match data with player information.
+result_df = joined_df.groupBy("Player_Name", "Country").agg(sum(col("Is_Captain").cast(IntegerType())).alias("total_matchesplayed_as_captain"))
+#this above code groups the data by "Player_Name" and "Country" and calculates the total number of matches played as a captain for each player.
+result_df = result_df.select("Player_Name", "Country", "total_matchesplayed_as_captain")
+#It selects and renames the necessary columns to prepare the final result.
+result_json = result_df.toJSON().collect()
+#This line converts the DataFrame rows to JSON format and collects them into a list.
+output_data = [json.loads(row) for row in result_json]
+with open("captain_wktkeeper.json", "w") as output_file:
+         json.dump(output_data, output_file, indent=2)
+... 
+#It converts the collected JSON data into a list and writes it to a JSON file named "captain_wktkeeper.json" with indentation for better readability.
+"""
+with open("captain_wktkeeper.json", "w") as output_file::
+This part of the code opens a file named "captain_wktkeeper.json" in write mode (denoted by "w") using a with statement. 
+It ensures that the file will be automatically closed when the block is exited, which is a recommended practice to avoid resource leaks.
+json.dump(output_data, output_file, indent=2):
+
+json.dump(): This function is part of the Python JSON module, and it is used to serialize Python objects (in this case, a list of dictionaries in output_data) into a JSON file.
+output_data: It's the list of dictionaries (JSON objects) that you want to save to the JSON file.
+output_file: It's the open file object where the JSON data will be written.
+The indent=2 argument in json.dump() is used for formatting the JSON output. 
+It specifies the number of spaces to use for indentation when writing the JSON data to the file. In this case, indent=2 is used to make the JSON data 
+more human-readable by formatting it with two spaces of indentation. This indentation is purely for readability and is not required for the JSON data to be valid. 
+It's useful when you need to view or edit the JSON file manually as it makes the structure of the data more clear and organized.
+"""
+#output will be in localhost (LINUX)
+
+[hduser@localhost ~]$ cat captain_wktkeeper.json
+[
+  {
+    "Player_Name": "AC Gilchrist",
+    "Country": "Australia",
+    "total_matchesplayed_as_captain": 74
+  },
+  {
+    "Player_Name": "KD Karthik",
+    "Country": "India",
+    "total_matchesplayed_as_captain": 7
+  },
+  {
+    "Player_Name": "MS Dhoni",
+    "Country": "India",
+    "total_matchesplayed_as_captain": 136
+  },
+  {
+    "Player_Name": "PA Patel",
+    "Country": "India",
+    "total_matchesplayed_as_captain": 1
+  },
+  {
+    "Player_Name": "KC Sangakkara",
+    "Country": "Sri Lanka",
+    "total_matchesplayed_as_captain": 27
+  },
+  {
+    "Player_Name": "BB McCullum",
+    "Country": "New Zealand",
+    "total_matchesplayed_as_captain": 4
+  }
+][hduser@localhost ~]$ 
+
+III. use Player_Match.csv , Team.csv and tbl_player 
+
+1. get the total number matches played by a player(not a captian) on each team and load the data into mysql db .
+
+table name : ipl.tbl_player
+db : mysql 
+columns : id,name,teamname,numberofmatches
+filter : from Player_Match.csv exclude captain Is_Captain=1
+
+-> join all theree datas get the information
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from pyspark.sql import functions as F
+
+spark = SparkSession.builder.config("spark.jars", "/home/hduser/install/mysql-connector-java.jar,/home/hduser/install/txw2-20110809.jar,/home/hduser/install/spark-xml_2.12-0.17.0.jar").config("hive.exec.dynamic.partition.mode", "nonstrict").appName("TotalMatchesByPlayer").enableHiveSupport().getOrCreate()
+
+player_match_df = spark.read.option("header", "true").csv("file:/home/hduser/ipldata/Player_Match.csv").show()
+team_df = spark.read.option("header", "true").csv("file:/home/hduser/ipldata/Team.csv").show()
+tbl_player_df = spark.table("ipldata.tbl_player").show()
+
+player_match_df = player_match_df.filter(col("Is_Captain") != 1)
+
+joined_data = player_match_df.join(tbl_player_df, "Player_Id").join(team_df, player_match_df.Match_Id == team_df.Team_Id)
+result_df = joined_data.groupBy("Player_Id", "Player_Name", "Team_Name").agg(F.count("*").alias("numberofmatches"))
+result_df.show()
+
+result_df.write.jdbc(url="jdbc:mysql://localhost/ipl",table="ipl.tbl_player", mode="overwrite",  properties={"user": "root", "password": "Root123$", "driver": "com.mysql.jdbc.Driver"}
